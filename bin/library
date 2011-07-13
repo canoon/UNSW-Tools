@@ -1,0 +1,34 @@
+#!/usr/bin/env ruby
+require 'unsw/library'
+
+# Settings
+CONFIG_FILE = File.expand_path "~/.unsw_config.yml"
+begin
+  CONFIG = YAML::load_file(CONFIG_FILE)
+rescue Errno::ENOENT => e
+  # Setup default settings
+  CONFIG = {:username => "USERNAME", :password => "PASSWORD", :debug => false,
+    :law_room => true, :media_room => true, :library_room => true}
+  File.open(CONFIG_FILE, 'w') {|x| x.write(YAML::dump(CONFIG))}
+  puts "You need to enter your username and password into the ~/.unsw_config.yml file."
+  exit
+end
+
+$log = Logger.new(STDERR)
+$log.level = Logger::FATAL
+if CONFIG[:debug]
+  $log.level = Logger::DEBUG
+end
+
+# Create new primoa object
+primoa = Library::Primoa.new(CONFIG)
+# Authenticate using stored credentials
+# Create aleph object
+# Obtain a session id
+# Authenticate with sso credentials
+aleph = Library::Aleph.new(primoa)
+# Pull an example request
+roomList = Library::RoomList.new(aleph)
+roomList.load
+roomList.loadAll
+roomList.rooms.each{|k, v| puts "Room #{k}";p v}
