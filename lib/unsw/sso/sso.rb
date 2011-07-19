@@ -7,105 +7,158 @@ require 'cgi'
 require 'nokogiri'
 require 'highline/import'
 
-module Net
-  class HTTP
-    def fix_cookies(headers)
-      if headers['Cookie']
-        headers['Cookie'] = headers['Cookie'].collect{|k, v| "#{k}=#{v}"}.join("; ")
-      end
-      headers
+class HTTPUtil
+  def self.fix_cookies(headers)
+    if headers['Cookie']
+      headers['Cookie'] = headers['Cookie'].collect{|k, v| "#{k}=#{v}"}.join("; ")
     end
-    def get_params(path, headers={})
-      headers = fix_cookies(headers)
-      p path
-      self.get(path, headers)
+    headers
+  end
+  def self.get_path(uri)
+    if uri.query
+      return uri.path + '?' + uri.query
+    else
+      return uri.path
+    end
+  end
+  def self.get(uri, headers={})
+    if uri.is_a? String
+      uri = URI.parse(uri)
+    end
+    conn = Net::HTTP.new(uri.host, uri.port)
+    if uri.scheme == 'https'
+      conn.use_ssl = true
+    end
+    headers = fix_cookies(headers)
+    p uri
+    
+    conn.get(get_path(uri), headers)
+  end
+  def self.post(uri, hash, headers = {})
+    if uri.is_a? String
+      uri = URI.parse(uri)
+    end
+    conn = Net::HTTP.new(uri.host, uri.port)
+    if uri.scheme == 'https'
+      conn.use_ssl = true
+    end
+    headers = fix_cookies(headers)
+    
+    if hash != {} && hash != nil 
+      data = hash.collect{|k,v| "#{CGI.escape(k.to_s)}=#{CGI.escape(v.to_s)}"}.join('&')
+    end
+    display = data
+    if !$password.empty?
+      display = display.gsub(CGI.escape($password), '*' * CGI.escape($password).length)
+    end
+    p display
+    p uri
+    conn.post(get_path(uri), data, headers)
 
+  end
+  def self.cookiestohash(array)
+    # Why reverse? because the unsw server sends out multiple cookies with the same name and we need to ignore some.
+    if array
+      Hash[array.collect{ |x| x.split(';').first.split('=') }.reverse]
+    else
+      {}
     end
-    def post_params(path, hash, headers = {})
-      headers = fix_cookies(headers)
-      if hash != {} && hash != nil 
-        data = hash.collect{|k,v| "#{CGI.escape(k.to_s)}=#{CGI.escape(v.to_s)}"}.join('&')
-      end
-      p data
-      self.post(path, data, headers)
-
-    end
+  end
+  def self.tourl(path, params)
+    path + "?" + params.collect{|k,v| "#{CGI.escape(k.to_s)}=#{CGI.escape(v.to_s)}"}.join('&')
   end
 end
 
-def cookiestohash(array)
-  # Why reverse? because the unsw server sends out multiple cookies with the same name and we need to ignore some.
-  Hash[array.collect{ |x| x.split(';').first.split('=') }.reverse]
+
+class SSO
+  URL = "https://ssologin.unsw.edu.au/cas/login"
+  COOKIE = "CASTGC"
+  def initialize
+  end
+
+  def get_ticket(service)
+    login_url = HTTPUtil.tourl(URL, {:service => service})
+    response = HTTPUtil.get(login_url, {'Cookie' => {COOKIE => @tgt}})
+    cookies = HTTPUtil.cookiestohash(response.get_fields('set-cookie'))
+    if !response.is_a? Net::HTTPRedirection
+      if !response.is_a? Net::HTTPSuccess
+        raise "WTF got a #{response}"
+      end
+      doc = Nokogiri::HTML(response.body)
+      lt = doc.css('#muLoginForm input[name="lt"]').first['value']
+      
+      username = ""
+      password = ""
+  
+      if ENV['UNSW_USERNAME'] then
+        username = ENV['UNSW_USERNAME']
+        password = ENV['UNSW_PASSWORD']
+      else
+        puts "Please enter your UNSW credentials"
+        username = ask("Username: ") { |q| q.echo = true }
+        password = ask("Password: ") { |q| q.echo = "*" }
+      end
+      $password = password  
+      response = HTTPUtil.post(login_url, {'lt' => lt, 'username' => username, 'password' => password, '_eventId' => 'submit'})
+      if !response.is_a? Net::HTTPRedirection
+        raise "WTF2 got a #{response}"
+      end
+    
+      cookies = HTTPUtil.cookiestohash(response.get_fields('set-cookie'))
+    else
+      puts "Already logged in"
+    end
+    @tgt = cookies[COOKIE]
+
+    ticket = response.get_fields('location').first.sub(/^.*&ticket=/, '')
+  end
 end
 
-def tourl(path, params)
-  path + "?" + params.collect{|k,v| "#{CGI.escape(k.to_s)}=#{CGI.escape(v.to_s)}"}.join('&')
-end
+class MyUNSW
+  URL = "https://my.unsw.edu.au/amserver/UI/Login"
+  PARAMS = {:module => 'ISISWSSO', :IDToken1 => ''} 
+  COOKIES = ['iPlanetDirectoryPro', 'AMAuthCookie']
+  def initialize(sso=nil)
+    if sso
+      @sso = sso
+    else
+      @sso = SSO.new
+    end
+  end
+  def auth
+    ticket = @sso.get_ticket(HTTPUtil.tourl(URL, PARAMS))
 
-#sso = "https://ssologin.unsw.edu.au/cas/login"
-
-service= "https://my.unsw.edu.au/amserver/UI/Login?module=ISISWSSO&IDToken1="
-
-conn = Net::HTTP.new("ssologin.unsw.edu.au", 443);
-
-conn.use_ssl = true
-
-
-
-p result = conn.get_params(tourl("/cas/login", {:service => service}))
-
-puts result.body
-
-doc = Nokogiri::HTML(result.body)
-
-lt = doc.css('#muLoginForm input[name="lt"]').first['value']
-
-username = ""
-password = ""
-
-if ENV['UNSW_USERNAME'] then
-  username = ENV['UNSW_USERNAME']
-  password = ENV['UNSW_PASSWORD']
-else
-  puts "Please enter your UNSW credentials"
-  username = ask("Username: ") { |q| q.echo = true }
-  password = ask("Password: ") { |q| q.echo = "*" }
+    response = HTTPUtil.get(HTTPUtil.tourl(URL, PARAMS.merge({:ticket => ticket})))
+    if !response.is_a? Net::HTTPRedirection
+      raise "WTF MyUNSW Auth failed got a #{response}"
+    end
+    cookies = HTTPUtil.cookiestohash(response.get_fields('set-cookie'))
+    @cookie = cookies[COOKIES.first]
+  end
+  def get(uri)
+    if @cookie.nil?
+      self.auth
+    end
+    
+    cookies = Hash[COOKIES.collect{|x| [x, @cookie]}]
+    response = HTTPUtil.get(uri, {'Cookie' => cookies})
+  end
 end
 
 
-p login_result = conn.post_params(tourl("/cas/login", {:service => service}), {:lt => lt, :username => username, :password => password, :'_eventId' => 'submit'})
+#sso = SSO.new
 
-puts login_result.class
+#service= "https://my.unsw.edu.au/amserver/UI/Login?module=ISISWSSO&IDToken1="
 
-puts authurl = login_result.get_fields('location').first
+#puts sso.get_ticket(service)
 
-p cookies = cookiestohash(login_result.get_fields('set-cookie'))
-
-p cookies['CASTGC']
-
-p login_result.body
-
-p ticket = authurl.sub(/^.*&ticket=/, '')
+#puts sso.get_ticket(service)
+puts MyUNSW.new.get("https://my.unsw.edu.au/active/studentTimetable/timetable.xml").body
+exit 0
 
 
 
-myunsw = Net::HTTP.new("my.unsw.edu.au", 443)
 
-myunsw.use_ssl = true
-
-p unswresult = myunsw.get_params(tourl('/amserver/UI/Login', {:module => 'ISISWSSO', :IDToken1 => '', :ticket => ticket})) #, {"Cookie" => "amlbcookie=02"})
-
-puts unswresult.body
-
-p cookies2 = cookiestohash(unswresult.get_fields('set-cookie'))
-
-p token = cookies2['AMAuthCookie']
-
-p test = myunsw.get_params('/active/studentTimetable/timetable.xml', {"Cookie" => {"AMAuthCookie" => token, "iPlanetDirectoryPro" => token}})
-
-p test.body
-
-File.open("timetable", 'w') {|f| f.write(test.body) }
 
 
 
