@@ -81,6 +81,8 @@ class SSO
   def initialize
   end
 
+    
+
   def get_ticket(service)
     login_url = HTTPUtil.tourl(URL, {:service => service})
     response = HTTPUtil.get(login_url, {'Cookie' => {COOKIE => @tgt}})
@@ -160,7 +162,7 @@ end
 
 
 class UNSW
-  SERVICES = ["https://my.unsw.edu.au/amserver/UI/Login?module=ISISWSSO&IDToken1=", "https://lms-blackboard.telt.unsw.edu.au/webapps/login"]
+  SERVICES = ["https://my.unsw.edu.au/amserver/UI/Login?module=ISISWSSO&IDToken1=", "https://lms-blackboard.telt.unsw.edu.au/webapps/login", "https://moodle.telt.unsw.edu.au/login/index.php?authCAS=CAS"]
   def initialize()
     @connections = {}
   end
@@ -192,3 +194,4 @@ end
 
 puts UNSW.get("https://my.unsw.edu.au/active/studentTimetable/timetable.xml").body
 puts UNSW.get("https://lms-blackboard.telt.unsw.edu.au/webapps/portal/frameset.jsp").body
+puts UNSW.get("http://moodle.telt.unsw.edu.au/my/").body
