@@ -65,7 +65,12 @@ class HTTPUtil
     end
   end
   def self.tourl(path, params)
-    path + "?" + params.collect{|k,v| "#{CGI.escape(k.to_s)}=#{CGI.escape(v.to_s)}"}.join('&')
+    if path =~ /\?/
+      sep = '&'
+    else
+      sep = '?'
+    end
+    path + sep + params.collect{|k,v| "#{CGI.escape(k.to_s)}=#{CGI.escape(v.to_s)}"}.join('&')
   end
 end
 
@@ -110,15 +115,13 @@ class SSO
     end
     @tgt = cookies[COOKIE]
 
-    ticket = response.get_fields('location').first.sub(/^.*&ticket=/, '')
+    ticket = response.get_fields('location').first.sub(/^.*ticket=/, '')
   end
 end
 
-class MyUNSW
-  URL = "https://my.unsw.edu.au/amserver/UI/Login"
-  PARAMS = {:module => 'ISISWSSO', :IDToken1 => ''} 
-  COOKIES = ['iPlanetDirectoryPro', 'AMAuthCookie']
-  def initialize(sso=nil)
+class SSOService
+  def initialize(url, sso=nil)
+    @url = url
     if sso
       @sso = sso
     else
@@ -126,42 +129,66 @@ class MyUNSW
     end
   end
   def auth
-    ticket = @sso.get_ticket(HTTPUtil.tourl(URL, PARAMS))
+    # don't ask me about this bit
+    ticket = @sso.get_ticket(@url)
 
-    response = HTTPUtil.get(HTTPUtil.tourl(URL, PARAMS.merge({:ticket => ticket})))
+    response = HTTPUtil.get(HTTPUtil.tourl(@url, {:ticket => ticket}))
     if !response.is_a? Net::HTTPRedirection
-      raise "WTF MyUNSW Auth failed got a #{response}"
+      raise "WTF #{url} Auth failed got a #{response}"
     end
-    cookies = HTTPUtil.cookiestohash(response.get_fields('set-cookie'))
-    @cookie = cookies[COOKIES.first]
+    p response.to_hash
+    @cookies = HTTPUtil.cookiestohash(response.get_fields('set-cookie'))
+    if URI.parse(@url).host == 'lms-blackboard.telt.unsw.edu.au'
+      response = HTTPUtil.get(response.get_fields('location').first)
+      if !response.is_a? Net::HTTPSuccess
+        p response.body
+        raise "WTF #{url} Auth failed got a #{response}"
+      end
+      @cookies = HTTPUtil.cookiestohash(response.get_fields('set-cookie'))
+      @cookies.delete('JSESSIONID')
+    end
+    p @cookies
   end
   def get(uri)
     if @cookie.nil?
       self.auth
     end
     
-    cookies = Hash[COOKIES.collect{|x| [x, @cookie]}]
-    response = HTTPUtil.get(uri, {'Cookie' => cookies})
+    response = HTTPUtil.get(uri, {'Cookie' => @cookies})
   end
 end
 
 
-#sso = SSO.new
+class UNSW
+  SERVICES = ["https://my.unsw.edu.au/amserver/UI/Login?module=ISISWSSO&IDToken1=", "https://lms-blackboard.telt.unsw.edu.au/webapps/login"]
+  def initialize()
+    @connections = {}
+  end
+  def sso
+    @sso ||= SSO.new
+  end
+  def get(uri)
+    if uri.is_a? String
+      uri = URI.parse(uri)
+    end
+    
+    if !@connections[uri.host]
+      selected = nil
+      SERVICES.each {|x|
+        if URI.parse(x).host == uri.host
+          selected = x
+        end
+      }
+      @connections[uri.host] = SSOService.new(selected, sso)
+    end
+    
+    @connections[uri.host].get(uri)
+  end
+  def self.get(uri)
+    @default ||= UNSW.new
+    p @default.get(uri)
+  end
+end
 
-#service= "https://my.unsw.edu.au/amserver/UI/Login?module=ISISWSSO&IDToken1="
-
-#puts sso.get_ticket(service)
-
-#puts sso.get_ticket(service)
-puts MyUNSW.new.get("https://my.unsw.edu.au/active/studentTimetable/timetable.xml").body
-exit 0
-
-
-
-
-
-
-
-
-#conn.get
-
+puts UNSW.get("https://my.unsw.edu.au/active/studentTimetable/timetable.xml").body
+puts UNSW.get("https://lms-blackboard.telt.unsw.edu.au/webapps/portal/frameset.jsp").body
