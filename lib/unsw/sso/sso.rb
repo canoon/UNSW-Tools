@@ -6,6 +6,52 @@ require 'uri'
 require 'cgi'
 require 'nokogiri'
 require 'highline/import'
+require 'icalendar'
+require 'date'
+
+include Icalendar
+
+class UNSWDate
+  def self.dateParse(day, weeks, time)
+    t = timeParse(time)
+    d = Date::ABBR_DAYNAMES.index(day)
+    ws = weeksParse(weeks)
+    ws.collect{|w|
+      t.collect{|x| buildDate(w, d, x)}
+    }
+  end
+
+  def self.buildDate(w, d, t)
+    # Fucked
+    i = Time.local(2012, 7, 15)
+    i += (w - 1) * 7 * 86400
+    i += d * 86400
+    dt = DateTime.new(i.year, i.month, i.day, t[0], t[1], 0, Rational(i.gmt_offset, 86400)) 
+    dt = dt.new_offset 0
+    dt
+  end
+    
+
+  def self.weeksParse(weeks)
+    weeks.split(",").collect{|x| 
+      if x =~ /-/
+	Range.new(*(x.split("-").collect{|x| x.to_i})).to_a
+      else
+        [x.to_i]
+      end
+    }.flatten
+  end
+  def self.timeParse(str)
+    str.split(" - ").collect{|x| timeParseInd(x)}
+  end
+  def self.timeParseInd(str)
+    result = [0, 0]
+    str.match(/([0-9]+):([0-9]+)([AP]M)/){|x|
+      result = [(x[1].to_i % 12) + (x[3] == "PM" ? 12 : 0), x[2].to_i]
+    }
+    result
+  end
+end
 
 class HTTPUtil
   def self.fix_cookies(headers)
@@ -30,7 +76,7 @@ class HTTPUtil
       conn.use_ssl = true
     end
     headers = fix_cookies(headers)
-    p uri
+    uri
     
     conn.get(get_path(uri), headers)
   end
@@ -51,8 +97,6 @@ class HTTPUtil
     if !$password.empty?
       display = display.gsub(CGI.escape($password), '*' * CGI.escape($password).length)
     end
-    p display
-    p uri
     conn.post(get_path(uri), data, headers)
 
   end
@@ -101,9 +145,10 @@ class SSO
         username = ENV['UNSW_USERNAME']
         password = ENV['UNSW_PASSWORD']
       else
-        puts "Please enter your UNSW credentials"
-        username = ask("Username: ") { |q| q.echo = true }
-        password = ask("Password: ") { |q| q.echo = "*" }
+        h = HighLine.new($stdin, $stderr)
+        h.say "Please enter your UNSW credentials"
+        username = h.ask("Username: ") { |q| q.echo = true }
+        password = h.ask("Password: ") { |q| q.echo = "*" }
       end
       $password = password  
       response = HTTPUtil.post(login_url, {'lt' => lt, 'username' => username, 'password' => password, '_eventId' => 'submit'})
@@ -138,18 +183,15 @@ class SSOService
     if !response.is_a? Net::HTTPRedirection
       raise "WTF #{url} Auth failed got a #{response}"
     end
-    p response.to_hash
     @cookies = HTTPUtil.cookiestohash(response.get_fields('set-cookie'))
     if URI.parse(@url).host == 'lms-blackboard.telt.unsw.edu.au'
       response = HTTPUtil.get(response.get_fields('location').first)
       if !response.is_a? Net::HTTPSuccess
-        p response.body
         raise "WTF #{url} Auth failed got a #{response}"
       end
       @cookies = HTTPUtil.cookiestohash(response.get_fields('set-cookie'))
       @cookies.delete('JSESSIONID')
     end
-    p @cookies
   end
   def get(uri)
     if @cookie.nil?
@@ -188,10 +230,74 @@ class UNSW
   end
   def self.get(uri)
     @default ||= UNSW.new
-    p @default.get(uri)
+    @default.get(uri)
   end
+
+  def self.timetable()
+    @default ||= UNSW.new
+    @default.timetable
+  end
+
+  def self.d
+    @default ||= UNSW.new
+  end
+
+  def timetable()
+    
+    doc = get("https://my.unsw.edu.au/active/studentTimetable/timetable.xml").body
+    
+    nok = Nokogiri::HTML.parse(doc);
+    
+    tables = nok.css("table").select{|x| x.css("td").first.content == "Activity"}
+    
+    previous = {}
+    
+    times = tables.collect{|x| x.css("tr.data").collect{|r|
+      tds = r.css("td").select{|x| x["class"] && x["class"].strip == "data"} .collect{|x| x.content.strip}
+      result = previous.clone
+      if (r.css("td").first["colspan"].nil?)
+        # They've actually specified the Activity / Section and it hasn't just been carried over
+        result[:activity] = tds.shift
+        result[:section] = tds.shift
+      end
+      result[:day] = tds.shift
+      result[:time] = tds.shift
+      result[:weeks] = tds.shift
+      result[:location] = tds.shift
+      result[:instructor] = tds
+      previous = result
+    }}
+    
+    courses = nok.css(".sectionHeading").collect{|x| x.content }
+    result = Hash[courses.zip(times)]
+    
+    result
+  end
+
+  def ical_timetable
+    tt = timetable
+    cal = Calendar.new
+
+    tt.each{|course, classes|
+      classes.each{|a|
+        UNSWDate.dateParse(a[:day], a[:weeks], a[:time]).each{|x|
+          cal.event do 
+            dtstart x[0]
+            dtend x[1]
+            summary(course + " - " + a[:activity])
+            description(a[:section] + ", instructor(s): " + a[:instructor].join(", "))
+            location(a[:location])
+          end
+        }
+      }
+    }
+    cal.to_ical
+  end    
+    
 end
 
-puts UNSW.get("https://my.unsw.edu.au/active/studentTimetable/timetable.xml").body
-puts UNSW.get("https://lms-blackboard.telt.unsw.edu.au/webapps/portal/frameset.jsp").body
-puts UNSW.get("http://moodle.telt.unsw.edu.au/my/").body
+Calendar.new
+puts UNSW.d.ical_timetable
+
+#puts UNSW.get("https://lms-blackboard.telt.unsw.edu.au/webapps/portal/frameset.jsp").body
+#puts UNSW.get("http://moodle.telt.unsw.edu.au/my/").body
